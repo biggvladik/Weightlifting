@@ -1,163 +1,99 @@
-import traceback
-
-import requests
-import os
-from urllib.parse import unquote, urlparse
+from playwright.sync_api import sync_playwright
+from pathlib import Path
+import csv
 
 
-def get_time(url: str):
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.5',
-        'Connection': 'keep-alive',
-    }
-    response = requests.get(url, timeout=1, headers=headers)
-    if response.status_code == 200:
-        data = response.json()
-        return int(data) // 60, int(data) % 60
-    return None
+def parse_results_table():
+    driver_path = "./chromium-1179/chrome-win/chrome.exe"
+    url = "http://localhost:8080/displays/resultsSimple?fop=A"
 
+    with sync_playwright() as p:
+        browser = p.chromium.launch(executable_path=driver_path)
+        page = browser.new_page()
+        page.goto(url)
 
-def find_name_by_id(player_id: int, players: list):
-    for player in players:
-        if player['id'] == player_id:
-            return player['first_name'], player['last_name']
+        # Ждем загрузки таблицы
+        page.wait_for_selector("table.results")
 
+        # Получаем все строки с результатами
+        rows = page.query_selector_all("table.results tr.athlete")
 
-def find_photo_by_id(player_id: int, players: list):
-    for player in players:
-        if player['id'] == player_id:
-            return player['icon']
+        results = []
 
-
-def create_packet_time(show: str, minutes: int, seconds: int):
-    s = f'*/1/{show}/0/{minutes}/{seconds}/#'
-    return s
-
-
-def get_score_by_attempt(attempts_data, attempt):
-    if attempts_data:
-        for item in attempts_data:
-            if item.get('attempt') == attempt:
-                score = item.get('score')
-                if score is not None:
-                    # Если число (int или float), форматируем в строку с запятой
-                    if isinstance(score, (int, float)):
-                        return str(score).replace('.', ',')
-                    # Если уже строка, просто возвращаем (можно добавить замену точки на запятую, если нужно)
-                    return str(score)
-                return 0
-    return 0
-
-
-def get_live_data(url: str, stage_type: str):
-    data = requests.get(url, timeout=3).json()
-
-    score_res = []
-    tricks_res = []
-    for stage in data['stages']:
-        if stage['name'] == 'Квалификация':
-            stage_kval_id = stage['id']
-            res_kval = stage['results']
-        elif stage['name'] == 'Финал':
-            res_final = stage['results']
-            stage_final_id = stage['id']
-
-    stage_id = (lambda x: stage_kval_id if x == 'Квалификация' else stage_final_id)(stage_type)
-    res = (lambda x: res_kval if x == 'Квалификация' else res_final)(stage_type)
-
-    for player in res:
-        score_res.append(
-            {
-                'id': str(player['user_id']),
-                'score_1': get_score_by_attempt(player['attempts'], 1),
-                'score_2': get_score_by_attempt(player['attempts'], 2),
-                'total': str(player['total']),
-            }
-        )
-
-    runs_final = [x for x in data['runs'] if x['stage_id'] == stage_id]
-
-    for item in runs_final:
-        tricks_res.append({
-            'id': item['user_id'],
-            'tricks': (lambda x: x if x else [])(item['tricks']),
-            'attempt': item['attempt'],
-        })
-
-    return score_res, tricks_res
-
-
-def find_user_index(data, user_id):
-    for index, item in enumerate(data):
-        if item.get('user_id') == user_id:
-            return index + 1
-    return None
-
-
-def get_prematch_data(url: str, stage_type: str):
-
-    data = requests.get(url, timeout=5).json()
-
-    len_kval = 0
-    stage_final_id = 0
-    stage_kval_id = 0
-    for stage in data['stages']:
-        if stage['name'] == 'Квалификация':
-            stage_kval_id = stage['id']
-            len_kval = len(stage['results'])
-        elif stage['name'] == 'Финал':
-            stage_final_id = stage['id']
-
-    players = []
-
-    if stage_type == 'Финал':
-        runs_final = [x for x in data['runs'][len_kval * 2::] if x['attempt'] == 1 and x['stage_id'] == stage_final_id]
-        for stage in data['stages']:
-            if stage['name'] == 'Финал':
-                for player in stage['results']:
-                    players.append({
-                        'name': find_name_by_id(player['user_id'], data['participants'])[0],
-                        'surname': find_name_by_id(player['user_id'], data['participants'])[1],
-                        'id': player['user_id'],
-                        'bib': find_user_index(runs_final, player['user_id']),
-                        'photo': find_photo_by_id(player['user_id'], data['participants']),
-                    })
-    else:
-        runs_kval = [x for x in data['runs'] if x['attempt'] == 1 and x['stage_id'] == stage_kval_id]
-
-        for stage in data['stages']:
-            if stage['name'] == 'Квалификация':
-                for player in stage['results']:
-                    players.append({
-                        'name': find_name_by_id(player['user_id'], data['participants'])[0],
-                        'surname': find_name_by_id(player['user_id'], data['participants'])[1],
-                        'id': player['user_id'],
-                        'bib': find_user_index(runs_kval, player['user_id']),
-                        'photo': find_photo_by_id(player['user_id'], data['participants']),
-                    })
-
-    return players
-
-
-def load_photo(d: list, base_road: str):
-    res = []
-    for player in d:
-
-        if len(player['photo']) != 0:
+        for row in rows:
+            # Извлекаем данные из каждой колонки
             try:
-                response = requests.get(player['photo'], stream=True)
-                response.raise_for_status()
-                filename = os.path.basename(unquote(urlparse(player['photo']).path))
-                road_save = f'{base_road}/{filename}'
-                player['road_save'] = road_save
-                with open(road_save, 'wb') as file:
-                    for chunk in response.iter_content(1024):
-                        file.write(chunk)
+                position = row.query_selector("td.start div").inner_text().strip()
+                name = row.query_selector("td.name div").inner_text().strip()
+                category = row.query_selector("td.category div").inner_text().strip()
+                yob = row.query_selector("td.yob div").inner_text().strip()
+                rank = row.query_selector("td.custom1 div").inner_text().strip()
+                team = row.query_selector("td.club .clubName div").inner_text().strip()
+            except Exception as e:
+                print(f"Ошибка при извлечении основных данных: {e}")
+                continue
 
-                res.append({'id': player['id'], 'road_save': road_save})
+            # Результаты рывка (первые 3 попытки после первого vspacer)
+            snatch_results = []
+            snatch_cells = row.query_selector_all(
+                "xpath=.//td[contains(@class, 'fail') or contains(@class, 'good') or contains(@class, 'empty')][position() <= 3]")
+
+            for cell in snatch_cells[:3]:  # Берем только первые 3 попытки
+                try:
+                    class_name = cell.get_attribute("class") or ""
+                    weight = cell.query_selector("div").inner_text().strip()
+                    if "fail" in class_name:
+                        snatch_results.append(f"fail({weight})")
+                    elif "good" in class_name:
+                        snatch_results.append(f"good({weight})")
+                    else:
+                        snatch_results.append(weight)
+                except:
+                    snatch_results.append("")
+
+            # Результаты толчка (последующие 3 попытки после второго vspacer)
+            jerk_results = []
+            jerk_cells = row.query_selector_all(
+                "xpath=.//td[contains(@class, 'fail') or contains(@class, 'good') or contains(@class, 'empty')][position() > 3 and position() <= 6]")
+
+            for cell in jerk_cells[:3]:  # Берем только первые 3 попытки толчка
+                try:
+                    class_name = cell.get_attribute("class") or ""
+                    weight = cell.query_selector("div").inner_text().strip()
+                    if "fail" in class_name:
+                        jerk_results.append(f"fail({weight})")
+                    elif "good" in class_name:
+                        jerk_results.append(f"good({weight})")
+                    else:
+                        jerk_results.append(weight)
+                except:
+                    jerk_results.append("")
+
+            # Сумма
+            try:
+                total = row.query_selector("td.total div").inner_text().strip()
             except:
-                pass
+                total = ""
 
-    return res
+            results.append({
+                'Позиция': position,
+                'ФИО': name,
+                'Категория': category,
+                'Год рождения': yob,
+                'Разряд': rank,
+                'Команда': team,
+                'Рывок 1': snatch_results[0] if len(snatch_results) > 0 else '',
+                'Рывок 2': snatch_results[1] if len(snatch_results) > 1 else '',
+                'Рывок 3': snatch_results[2] if len(snatch_results) > 2 else '',
+                'Толчок 1': jerk_results[0] if len(jerk_results) > 0 else '',
+                'Толчок 2': jerk_results[1] if len(jerk_results) > 1 else '',
+                'Толчок 3': jerk_results[2] if len(jerk_results) > 2 else '',
+                'Сумма': total
+            })
+
+        print(results)
+        browser.close()
+
+
+if __name__ == "__main__":
+    parse_results_table()
